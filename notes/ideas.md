@@ -3,6 +3,21 @@
 Changes to the runner that are wanted but not made yet, and behaviour still to be seen in
 a real run. Newest at the bottom of each list. Dates from `date`.
 
+## To do
+
+**Ideas are things to do, not a wish list** (user, 2026-11-19 14:29 +0000). An idea for the
+runner goes on this list beside the issues that actual use has shown, and is worked off the
+same way; neither kind is dropped because it did not come from a failure. Each entry says
+where it came from and what it waits for, if anything; the detail is in the section named.
+
+- [ ] **`var/current.log`**, a link that follows the current run's log (idea; waits for the
+  usage-limit and orderly-stop checks). Ideas.
+- [ ] **Idle timer from the session's files** (idea; a safeguard, since reviewer steps do
+  come through in the output). Ideas.
+- [ ] **Cost of an interrupted run** shown as $0.00 (from use: run 2, 2026-11-19). Ideas.
+- [ ] **The merge gate checks only the last review round** (from use: `eof`'s `ff3`; not the
+  runner's: raise with the trace's coordinator). Outside the runner.
+
 ## Waiting on checks
 
 Things that only a real run shows. Make the changes below only once these have been seen.
