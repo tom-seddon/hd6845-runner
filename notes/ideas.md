@@ -10,17 +10,28 @@ runner goes on this list beside the issues that actual use has shown, and is wor
 same way; neither kind is dropped because it did not come from a failure. Each entry says
 where it came from and what it waits for, if anything; the detail is in the section named.
 
-- [ ] **`var/current.log`**, a link that follows the current run's log (idea; waited for the
+- [x] **`var/current.log`**, a link that follows the current run's log (idea; waited for the
   usage-limit and orderly-stop checks: the orderly stop was seen in run 3, and the usage limit
-  is now hours of running away, after the quota reset of 2026-11-19; whether to keep waiting
-  for it is the user's call). Ideas.
-- [ ] **Idle timer from the session's files** (idea; a safeguard, since reviewer steps do
-  come through in the output). Ideas.
-- [ ] **Cost of an interrupted run** shown as $0.00 (from use: run 2, 2026-11-19). Ideas.
-- [ ] **The merge gate checks only the last review round** (from use: `eof`'s `ff3`; not the
-  runner's: raise with the trace's coordinator; a note for chat drafted 2026-11-19). Outside
-  the runner.
-- [ ] **Report headings give the wrong time** (from use: run 3, 2026-11-19 15:17 +0000). A
+  is now hours of running away, after the quota reset of 2026-11-19). Ideas. **Made
+  2026-11-19 15:21 +0000** (the user asked for it without waiting longer): each run's start
+  points the link at its `var/runs/NNN.log` (a relative link, replaced in one step), and the
+  start-up message and `--check` print `tail -F var/current.log`.
+- [x] **Idle timer from the session's files** (idea; a safeguard, since reviewer steps do
+  come through in the output). Ideas. **Made 2026-11-19 15:21 +0000:** every 10 seconds the
+  run checks the total size of its session's history files (`<session>.jsonl` and
+  `<session>/subagents/*.jsonl`); growth counts as activity, like output on the stream.
+- [x] **Cost of an interrupted run** shown as $0.00 (from use: run 2, 2026-11-19). Ideas.
+  **Made 2026-11-19 15:21 +0000:** the run keeps the usage of each response seen on the stream
+  (by message ID); a run with no result shows that at Fable's API prices, marked "estimated
+  from the stream: no result". Whether the stream carries the reviewers' usage too is not yet
+  seen; if not, the estimate is low by their share.
+- [x] **The merge gate checks only the last review round** (from use: `eof`'s `ff3`; not the
+  runner's). Outside the runner. **Closed here 2026-11-19:** the user opened
+  [waitingforvsync/hd6845-trace#21](https://github.com/waitingforvsync/hd6845-trace/issues/21)
+  (15:14 UTC), where the trace's coordinator tracks it.
+- [x] **Report headings give the wrong time** (from use: run 3, 2026-11-19 15:17 +0000).
+  **Made 2026-11-19 15:21 +0000:** headings are numbered across the run's report, resumes
+  included ("result 2: success, 25 turns (received ..., when the run ended)"). A
   headless run emits all its results when it ends, so each heading in
   `var/runs/NNN-report.md` shows when the result *arrived*: run 3's two results (the turn that
   ended at 14:46 to wait for its reviewer, and the final report) are both headed 15:12:22.
@@ -161,7 +172,8 @@ The run added 6 and 7 and changed 1 and 4; each item says what was made.
   trace's coordinator, `tools/mergecheck.py`). It passes when the last "Round N:" line of the
   notes' Review section is clean, so a piece shipped after an earlier piece's clean round can
   be merged without a review of its own: `eof`'s `ff3` (run 1, 2026-11-19) had no round while
-  round 6, for `g7700`, was the last line. Worth raising with the coordinator.
+  round 6, for `g7700`, was the last line. Raised as
+  [waitingforvsync/hd6845-trace#21](https://github.com/waitingforvsync/hd6845-trace/issues/21).
 
 ## Findings
 

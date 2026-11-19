@@ -12,7 +12,7 @@ the `claude` command on the PATH.
 
 ```
 ./runner.py --check      # check the setup and show what would run; runs nothing
-./runner.py              # start; prints the `tail -f` command for its log
+./runner.py              # start; prints the `tail` commands for its log and the current run
 ./runner.py --reset      # forget the saved session and counters; runs nothing
 ```
 
@@ -33,7 +33,12 @@ begins a new run instead of resuming the saved session.
 | `var/runner.log` | one line per event: `START`, `RUN`, `DONE`, `MERGED`, `NOMERGE`, `ENDED`, `BLOCKED`, `RESUME`, `STOPPED`, `RESET`, `WARNING` (`tail -f`) |
 | `var/status` | one line: what it is doing now |
 | `var/runs/NNN.log` | what run NNN did, one line per tool call or message, and each auto-mode refusal |
-| `var/runs/NNN-report.md` | the run's reports: the text of every result, in order |
+| `var/current.log` | a link to the current run's log: `tail -F var/current.log` follows it from one run to the next |
+| `var/runs/NNN-report.md` | the run's reports: the text of every result, numbered in order (a headless run sends them all when it ends) |
+
+A run's cost in the log is Claude Code's own figure. A run that ends without a result
+(interrupted, stalled, a model mismatch) shows an estimate instead, from the usage of the
+responses seen on the stream at Fable's API prices, marked as such.
 
 The sessions themselves are ordinary Claude Code sessions: `claude --resume` in the trace
 repository lists them.
@@ -72,8 +77,10 @@ reported means that round did not happen. None of this overrides the skill's rul
   `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` set to the idle timeout (90 minutes by default):
   long enough for a review, and finite, so that a stray background command cannot hold a
   finished run open.
-- **A run that hangs.** No output for 90 minutes (`--idle-timeout`): stopped and resumed, at
-  most twice per session.
+- **A run that hangs.** No activity for 90 minutes (`--idle-timeout`): stopped and resumed, at
+  most twice per session. Activity is output on the stream or growth of the session's history
+  files (its own and its reviewers'), so a working reviewer keeps the timer going even if its
+  steps did not come through on the stream.
 - **Another session tracing.** Before each run, `claude agents --json` lists the Claude Code
   sessions on this Mac. The runner stops if one of them is busy in a package's working copy,
   or busy in the main checkout with a tracing call (the tracing wrapper, a ship, an edit of a

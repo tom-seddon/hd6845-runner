@@ -10,7 +10,8 @@ Feedback:
   var/runner.log    one line per event; follow it with `tail -f` (the path is printed at start)
   var/status        one line, the current state, rewritten as things happen
   var/runs/NNN.log  what run NNN did, one line per tool call or message
-  var/runs/NNN-report.md  the run's reports: the text of every result, in order
+  var/current.log   a link to the current run's log: `tail -F` follows it from run to run
+  var/runs/NNN-report.md  the run's reports: the text of every result, numbered in order
 
 Each run is refused if another Claude Code session is tracing in the repository, and a saved
 session that was resumed elsewhere is not resumed again. `--reset` forgets the saved session.
@@ -41,6 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VAR = os.path.join(HERE, 'var')
 RUNS = os.path.join(VAR, 'runs')
 LOG = os.path.join(VAR, 'runner.log')
+CURRENT = os.path.join(VAR, 'current.log')     # link to the current run's log, for `tail -F`
 STATUS = os.path.join(VAR, 'status')
 STATE = os.path.join(VAR, 'state.json')
 LOCK = os.path.join(VAR, 'runner.lock')
@@ -48,6 +50,11 @@ STOP = os.path.join(HERE, 'STOP')
 GO = os.path.join(HERE, 'GO')
 
 MODEL = 'claude-fable-5-2'     # the project's rule: tracing is done with Fable 5.2 only
+
+# Fable 5.2's API prices, $ per million tokens: input, output, 5-minute cache write, 1-hour cache
+# write, cache read (as tools/costs.py in the trace repository has them). Used only to estimate
+# the cost of a run that ends without a result (interrupted, stalled, a model mismatch).
+PRICES = (8.00, 40.00, 10.00, 16.00, 0.20)
 SYNTHETIC = '<synthetic>'      # Claude Code's own messages (errors, limits), not a model
 SKILL = os.path.join('.claude', 'skills', 'trace6845', 'SKILL.md')
 
@@ -182,6 +189,19 @@ def save_state(st):
     os.replace(tmp, STATE)
 
 
+def point_current(runlog):
+    """Point var/current.log at this run's log, so that `tail -F var/current.log` follows the
+    current run from one run to the next. The link is replaced in one step (rename)."""
+    open(runlog, 'a').close()
+    tmp = CURRENT + '.tmp'
+    try:
+        os.remove(tmp)
+    except FileNotFoundError:
+        pass
+    os.symlink(os.path.relpath(runlog, VAR), tmp)
+    os.replace(tmp, CURRENT)
+
+
 def take_file(path):
     """True if the control file exists; it is removed (consumed)."""
     try:
@@ -252,6 +272,12 @@ class Run:
         self.last = ''
         self.stalled = False
         self.interrupted = False
+        self.usage = {}                # message id -> usage, for a cost without a result
+        try:                           # results already in this run's report (a resumed run)
+            with open(self.report) as f:
+                self.results = sum(1 for line in f if line.startswith('<!-- result '))
+        except OSError:
+            self.results = 0
 
     def command(self):
         cmd = [self.a.claude, '-p', self.prompt, '--model', MODEL,
@@ -288,6 +314,8 @@ class Run:
                 return
             if model and not is_fable(model):
                 self.mismatch = 'a response came from %s' % model
+            if msg.get('id') and isinstance(msg.get('usage'), dict):
+                self.usage[msg['id']] = msg['usage']
             for b in content:
                 if not isinstance(b, dict):
                     continue
@@ -321,9 +349,14 @@ class Run:
             if ev.get('is_error') and LIMIT_RE.search(text):
                 self.limit_text = short(text, 200)
             if text.strip():
+                # Numbered, not timed: a headless run sends all its results when it ends, so the
+                # time one arrives is not the time its turn ended (run 3: both 15:12:22).
+                self.results += 1
                 with open(self.report, 'a') as f:
-                    f.write('<!-- result at %s: %s%s -->\n\n%s\n\n' % (
-                        stamp(), ev.get('subtype'), ', error' if ev.get('is_error') else '', text))
+                    f.write('<!-- result %d: %s%s, %s turns (received %s, when the run ended) -->'
+                            '\n\n%s\n\n' % (self.results, ev.get('subtype'),
+                                            ', error' if ev.get('is_error') else '',
+                                            ev.get('num_turns'), stamp(), text))
             self.note('result: %s%s, %s turns, $%.2f' % (
                 ev.get('subtype'), ' (error)' if ev.get('is_error') else '',
                 ev.get('num_turns'), ev.get('total_cost_usd') or 0))
@@ -335,6 +368,7 @@ class Run:
         stderr_path = self.runlog[:-4] + '.stderr'
         self.note('--- %s, %s: %s' % (stamp(self.started), 'resume' if self.resume else 'new session',
                                       short(self.prompt, 200)))
+        point_current(self.runlog)
         with open(stderr_path, 'a') as err:
             proc = subprocess.Popen(self.command(), cwd=self.a.repo, stdout=subprocess.PIPE,
                                     stderr=err, text=True, bufsize=1, env=run_env(self.a))
@@ -348,6 +382,7 @@ class Run:
         threading.Thread(target=reader, daemon=True).start()
         last_event = time.monotonic()
         last_status = 0.0
+        last_size = self.history_size()
         try:
             while True:
                 try:
@@ -376,6 +411,11 @@ class Run:
                     break
                 if time.monotonic() - last_status > 10:
                     last_status = time.monotonic()
+                    # Growth of the session's history files, its reviewers' among them, also
+                    # counts as activity, whatever comes through on stdout.
+                    size = self.history_size()
+                    if size != last_size:
+                        last_event, last_size = time.monotonic(), size
                     mins = (now() - self.started).total_seconds() / 60
                     self.out.status('RUNNING', 'run %d%s, %d min, %d tool calls; last: %s' % (
                         self.number, ' (resumed)' if self.resume else '', mins, self.tool_calls,
@@ -425,8 +465,45 @@ class Run:
             return 'error'
         return 'finished'
 
+    def history_size(self):
+        """Total size of the session's history files: the main one and its reviewers'."""
+        base = os.path.join(project_dir(self.a.repo), self.session)
+        total = 0
+        for p in [base + '.jsonl'] + [os.path.join(base, 'subagents', f) for f in
+                                      (os.listdir(os.path.join(base, 'subagents'))
+                                       if os.path.isdir(os.path.join(base, 'subagents')) else [])]:
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                pass
+        return total
+
+    def estimated_cost(self):
+        """The cost of the responses seen on the stream, at Fable's API prices."""
+        total = 0.0
+        for u in self.usage.values():
+            cc = u.get('cache_creation') or {}
+            w5 = cc.get('ephemeral_5m_input_tokens')
+            w1 = cc.get('ephemeral_1h_input_tokens')
+            if w5 is None and w1 is None:
+                w5, w1 = u.get('cache_creation_input_tokens') or 0, 0
+            tokens = (u.get('input_tokens') or 0, u.get('output_tokens') or 0, w5 or 0, w1 or 0,
+                      u.get('cache_read_input_tokens') or 0)
+            total += sum(t * p for t, p in zip(tokens, PRICES)) / 1e6
+        return total
+
     def cost(self):
-        return float((self.result or {}).get('total_cost_usd') or 0)
+        """The run's cost: Claude Code's own figure from the last result, or, for a run that
+        ended without one, an estimate from the responses seen on the stream."""
+        r = self.result or {}
+        if r.get('total_cost_usd') is not None:
+            return float(r['total_cost_usd'])
+        return self.estimated_cost()
+
+    def cost_text(self):
+        if (self.result or {}).get('total_cost_usd') is not None:
+            return '$%.2f' % self.cost()
+        return '$%.2f (estimated from the stream: no result)' % self.cost()
 
 
 # ---------------------------------------------------------------- waiting for quota
@@ -623,8 +700,9 @@ def parse_args():
     p.add_argument('--check-every', type=int, default=10, metavar='MIN',
                    help='minutes between quota checks while blocked (default: %(default)s)')
     p.add_argument('--idle-timeout', type=int, default=90, metavar='MIN',
-                   help='stop a run that prints nothing for this long, and resume it '
-                        '(default: %(default)s)')
+                   help='stop a run that shows no activity for this long (no output, and no '
+                        'growth of its session\'s history files), and resume it; also how long a '
+                        'run waits for background tasks after its turn ends (default: %(default)s)')
     p.add_argument('--effort', default='high', choices=('low', 'medium', 'high', 'xhigh', 'max'),
                    help='effort level of each run, new or resumed (default: %(default)s, as the '
                         'trace sessions in the desktop app have used)')
@@ -678,6 +756,7 @@ def main():
                         'when it has finished' % '; '.join(others))
     if a.check:
         print('log:     tail -f %s' % LOG)
+        print('run:     tail -F %s' % CURRENT)
         print('status:  cat %s' % STATUS)
         print('claude:  %s' % a.claude)
         print('repo:    %s' % a.repo)
@@ -706,7 +785,8 @@ def main():
     if shutil.which('caffeinate'):          # keep the Mac awake while the runner is going
         subprocess.Popen(['caffeinate', '-i', '-w', str(os.getpid())])
 
-    print('Follow the log with:\n\n  tail -f %s\n' % LOG, flush=True)
+    print('Follow the log with:\n\n  tail -f %s\n\nand the current run, across runs, with:\n\n'
+          '  tail -F %s\n' % (LOG, CURRENT), flush=True)
     out.log('START', 'pid %d; repo %s; model %s, effort %s; on quota: %s; permission mode: %s'
             % (os.getpid(), a.repo, MODEL, a.effort, a.on_quota, a.permission_mode))
     who = git(a.repo, 'config', 'user.name') or ''
@@ -754,8 +834,8 @@ def main():
         st['session'] = run.session
         st['total_cost_usd'] = round(st.get('total_cost_usd', 0) + run.cost(), 2)
         mins = (run.ended - run.started).total_seconds() / 60
-        summary = 'run %d: %d min, $%.2f (all runs $%.2f)' % (st['run'], mins, run.cost(),
-                                                             st['total_cost_usd'])
+        summary = 'run %d: %d min, %s (all runs $%.2f)' % (st['run'], mins, run.cost_text(),
+                                                          st['total_cost_usd'])
         if run.refusals:
             summary += ', %d refused by auto mode (see %s)' % (run.refusals, run.runlog)
 
