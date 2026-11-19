@@ -1,0 +1,11 @@
+# Run-time files: the log, status line, state, per-run logs and reports, lock.
+var/
+
+# Control files, created by hand to steer a running loop.
+STOP
+GO
+
+# Python and macOS clutter.
+__pycache__/
+*.pyc
+.DS_Store
