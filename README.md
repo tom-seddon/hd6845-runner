@@ -38,6 +38,15 @@ repository lists them.
   finishes first). Ctrl-C stops at once; the next start resumes the interrupted session.
 - `touch GO`: while waiting for quota, check now instead of at the next interval.
 
+## What each run is told
+
+Every run, new or resumed, gets a short addition to its system prompt
+(`UNATTENDED_PROMPT` in `runner.py`): it is one run of an unattended loop, so it asks
+nothing and makes the skill's open choices by the skill's own rules; it does one round of
+one package and ends its turn after the step 9 report; at the hand-off it keeps the claim
+(`--continue`) while the package has work left and releases it when the package is finished.
+It overrides none of the skill's rules.
+
 ## What it guards against
 
 - **Another model.** Every run is started with `--model claude-fable-5-2` and no fallback

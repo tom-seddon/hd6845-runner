@@ -63,6 +63,18 @@ def is_fable(model):
     """True for the project's model, also when the name carries a context suffix such as [1m]."""
     return (model or '').split('[')[0] == MODEL
 
+# Appended to the system prompt of every run, new or resumed: a headless run does not know it
+# is part of a loop, and the skill leaves it a few choices that a person would otherwise make.
+UNATTENDED_PROMPT = (
+    'This session is one run of an unattended loop (hd6845-runner). Nobody will see or answer '
+    'questions until the run has ended, so do not ask the user anything. Where /trace6845 leaves '
+    'a choice, make it by the skill\'s own rules and say what you chose. Do one round of one '
+    'package. When the step 9 report is written, end your turn: the loop starts the next round '
+    'in a new session. At step 8, use `--continue` when the package has work left (the next run '
+    'carries on with it within minutes), and release the claim when it is finished. If a step '
+    'fails in a way the skill does not cover, stop as the skill says (push the branch, make the '
+    'notes say where to resume, report) and end your turn.')
+
 RESUME_PROMPT = ('You were stopped part-way through /trace6845 (by the usage limit, an error, or '
                  'the runner being interrupted). Carry on from exactly where you stopped, following '
                  'the /trace6845 instructions and notes/workflow.md to the letter. Check the state '
@@ -203,7 +215,8 @@ class Run:
     def command(self):
         cmd = [self.a.claude, '-p', self.prompt, '--model', MODEL,
                '--output-format', 'stream-json', '--verbose',
-               '--permission-mode', self.a.permission_mode]
+               '--permission-mode', self.a.permission_mode,
+               '--append-system-prompt', UNATTENDED_PROMPT]
         cmd += ['--resume', self.session] if self.resume else ['--session-id', self.session]
         return cmd
 
