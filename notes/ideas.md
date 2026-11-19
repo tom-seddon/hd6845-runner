@@ -10,44 +10,67 @@ runner goes on this list beside the issues that actual use has shown, and is wor
 same way; neither kind is dropped because it did not come from a failure. Each entry says
 where it came from and what it waits for, if anything; the detail is in the section named.
 
-- [ ] **`var/current.log`**, a link that follows the current run's log (idea; waits for the
-  usage-limit and orderly-stop checks). Ideas.
+- [ ] **`var/current.log`**, a link that follows the current run's log (idea; waited for the
+  usage-limit and orderly-stop checks: the orderly stop was seen in run 3, and the usage limit
+  is now hours of running away, after the quota reset of 2026-11-19; whether to keep waiting
+  for it is the user's call). Ideas.
 - [ ] **Idle timer from the session's files** (idea; a safeguard, since reviewer steps do
   come through in the output). Ideas.
 - [ ] **Cost of an interrupted run** shown as $0.00 (from use: run 2, 2026-11-19). Ideas.
 - [ ] **The merge gate checks only the last review round** (from use: `eof`'s `ff3`; not the
-  runner's: raise with the trace's coordinator). Outside the runner.
+  runner's: raise with the trace's coordinator; a note for chat drafted 2026-11-19). Outside
+  the runner.
+- [ ] **Report headings give the wrong time** (from use: run 3, 2026-11-19 15:17 +0000). A
+  headless run emits all its results when it ends, so each heading in
+  `var/runs/NNN-report.md` shows when the result *arrived*: run 3's two results (the turn that
+  ended at 14:46 to wait for its reviewer, and the final report) are both headed 15:12:22.
+  Number them instead ("result 1 of 2"), or take the time from the run log's last line before
+  each result. Both share one cost figure (the session total), which is right as it stands:
+  the runner adds only the last.
 
 ## Waiting on checks
 
 Things that only a real run shows. Make the changes below only once these have been seen.
 
-- [ ] **Usage limit.** A run stopped by the limit logs `BLOCKED` with the limit message
-  (first expected about 55 minutes into run 1, which started 2026-11-19 12:46 +0000). If
-  the run stops while `/usage` shows Fable at 100% and no `BLOCKED` line appears, the
-  wording was not recognised: look at the end of `var/runs/NNN.log` and `NNN.stderr` and
-  widen `LIMIT_RE`.
-- [ ] **Resume after the quota is back.** After the one-off quota reset, `touch GO`: the log
-  should show `RESUME`, then `RUN ... resuming session ...`, and the run carry on in the same
-  session.
-- [ ] **Orderly stop.** `touch STOP` while a run is going: the run finishes, then `STOPPED
-  stop file`. A later start begins a new run (the stopped one had finished).
-- [ ] **End of a run.** After the step 9 report the run ends its turn without asking
-  anything (`UNATTENDED_PROMPT`); the log shows `DONE`, then `MERGED` or `NOMERGE`.
+- [ ] **Usage limit.** A run stopped by the limit logs `BLOCKED` with the limit message. Not
+  yet seen: the one-off quota reset was used on 2026-11-19 (about 14:30-14:50; `/usage` showed
+  Fable at 4% at 14:52), so the limit is now hours of running away. If a run stops while
+  `/usage` shows Fable at 100% and no `BLOCKED` line appears, the wording was not recognised:
+  look at the end of `var/runs/NNN.log` and `NNN.stderr` and widen `LIMIT_RE`.
+- [ ] **Resume after the quota is back.** After the quota comes back (the one-off reset is
+  used up, so now the weekly reset, Saturday 03:00, or `GO` after it), the log should show
+  `RESUME`, then `RUN ... resuming session ...`, and the run carry on in the same session.
+- [x] **Orderly stop.** `touch STOP` while a run is going: the run finishes, then `STOPPED
+  stop file`. A later start begins a new run (the stopped one had finished). **Seen
+  2026-11-19 15:12 +0000** (run 3: `STOP` made at 14:51 during the review; the run went on to
+  the gate, the merge and the hand-off, then `DONE`, `MERGED`, `STOPPED stop file` at 15:12;
+  the file was used up; `state.json` says `finished`, so the next start is a new run 4).
+- [x] **End of a run.** After the step 9 report the run ends its turn without asking
+  anything (`UNATTENDED_PROMPT`); the log shows `DONE`, then `MERGED` or `NOMERGE`. **Seen
+  2026-11-19 15:12 +0000** (run 3: final report, no question; `DONE`, then `MERGED bb9af14
+  Handoff eof (8877c5b); claim kept`).
 - [x] **Reviewer activity.** Whether the reviewer agents' tool calls come through in the
   run's output (lines marked `[agent]` in `var/runs/NNN.log`), or the log goes quiet while
   a reviewer works. If it goes quiet, check `--idle-timeout` (90 min) is long enough for a
   full review. **Seen 2026-11-19 13:18 +0000: they come through** (run 1's log has the
   reviewer's steps as `[agent]` lines, 13:05-13:15).
-- [ ] **Waiting for reviewers.** After the changes of 2026-11-19 14:25 (Made, below): a
+- [x] **Waiting for reviewers.** After the changes of 2026-11-19 14:25 (Made, below): a
   headless run's reviewer runs to the end, its report reaches the run (in the same turn, or
   in a new turn after the run ended its turn to wait), and the run goes on to the merge gate.
   Look in `var/runs/NNN.log` for the reviewer's `[agent]` lines ending, then the gate. If the
   run ends with the reviewer's report never taken in, the background wait is not enough.
-- [ ] **No polling.** The run does not wait for a reviewer in a loop of Bash commands
+  **Seen 2026-11-19 15:12 +0000** (run 3: reviewer started 14:45, the run ended its turn to
+  wait at 14:46; the reviewer worked past 14:56, where run 1's was stopped, and handed back at
+  14:59; the run went on in a new turn of the same session at once: three geometry fixes with
+  the connections shown unchanged, round 9 recorded, the gate).
+- [x] **No polling.** The run does not wait for a reviewer in a loop of Bash commands
   (`until ... sleep`), and stops any background command it started before its final report.
-- [ ] **New checks quiet when they should be.** `--check` and each run's start do not stop
-  for this conversation or an idle app session (`others: none tracing`).
+  **Seen 2026-11-19 15:12 +0000** (run 3: no wait loops; no background command started, in the
+  session or its reviewer).
+- [x] **New checks quiet when they should be.** `--check` and each run's start do not stop
+  for this conversation or an idle app session (`others: none tracing`). **Seen 2026-11-19
+  15:12 +0000** (`--check` at 14:26 and run 3's start at 14:28, with this conversation busy
+  and an idle app session open, both in the main checkout).
 
 ## Ideas
 
@@ -159,3 +182,13 @@ The run added 6 and 7 and changed 1 and 4; each item says what was made.
   the resumed run 1 (14:19) only detached the terminal: the session went on as an idle
   background session (`claude agents --json`: kind `background`, state `done`), about 560 MB
   of memory and no quota. `claude stop <id>` ends it (done 14:21); its history stays.
+- **Run 3, the first clean run** (2026-11-19 15:17 +0000). 14:28-15:12, 44 minutes, $16.26 at
+  API prices, of which the reviewer $4.78 and the three merge laps $1.47; the runner's figure
+  matches the session histories exactly. One piece (`eof`'s `r4lat`), review round 9 clean,
+  merged `8877c5b`, hand-off `bb9af14`, claim kept. The merge step went round three times:
+  the gate passed each time and the first two pushes were rejected, because another
+  collaborator's `eofw` merge and hand-off reached main at 15:02-15:05; the run went back to
+  the top of step 7 each time, as the workflow says. Each lap adds a "Cost report" commit to
+  the branch (the trace's workflow, not the runner). For quota planning: about $22 per hour
+  of running, less than the desktop runs' $26. (`eof`'s notes have no round 8: the number
+  follows the image folder, and `review-8` held round 7's second reviewer.)
