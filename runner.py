@@ -215,6 +215,7 @@ class Run:
     def command(self):
         cmd = [self.a.claude, '-p', self.prompt, '--model', MODEL,
                '--output-format', 'stream-json', '--verbose',
+               '--effort', self.a.effort,
                '--permission-mode', self.a.permission_mode,
                '--append-system-prompt', UNATTENDED_PROMPT]
         cmd += ['--resume', self.session] if self.resume else ['--session-id', self.session]
@@ -451,6 +452,9 @@ def parse_args():
     p.add_argument('--idle-timeout', type=int, default=90, metavar='MIN',
                    help='stop a run that prints nothing for this long, and resume it '
                         '(default: %(default)s)')
+    p.add_argument('--effort', default='high', choices=('low', 'medium', 'high', 'xhigh', 'max'),
+                   help='effort level of each run, new or resumed (default: %(default)s, as the '
+                        'trace sessions in the desktop app have used)')
     p.add_argument('--permission-mode', default='auto',
                    choices=('auto', 'acceptEdits', 'bypassPermissions', 'dontAsk'),
                    help='permission mode of each run; nobody is there to approve anything '
@@ -478,6 +482,7 @@ def main():
         print('status:  cat %s' % STATUS)
         print('claude:  %s' % a.claude)
         print('repo:    %s' % a.repo)
+        print('model:   %s, effort %s, permission mode %s' % (MODEL, a.effort, a.permission_mode))
         print('state:   %s' % json.dumps(st))
         resume = st.get('session') and st.get('status') in ('running', 'interrupted')
         print('next:    %s' % ('resume session %s' % st['session'] if resume
@@ -510,8 +515,8 @@ def main():
         subprocess.Popen(['caffeinate', '-i', '-w', str(os.getpid())])
 
     print('Follow the log with:\n\n  tail -f %s\n' % LOG, flush=True)
-    out.log('START', 'pid %d; repo %s; model %s; on quota: %s; permission mode: %s'
-            % (os.getpid(), a.repo, MODEL, a.on_quota, a.permission_mode))
+    out.log('START', 'pid %d; repo %s; model %s, effort %s; on quota: %s; permission mode: %s'
+            % (os.getpid(), a.repo, MODEL, a.effort, a.on_quota, a.permission_mode))
     who = git(a.repo, 'config', 'user.name') or ''
     package = a.package
 

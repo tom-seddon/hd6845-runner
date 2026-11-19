@@ -17,8 +17,10 @@ the `claude` command on the PATH.
 
 `./runner.py --help` lists the options: the first package (`--package`), what to do at the
 usage limit (`--on-quota wait|stop`), how often to check the quota while blocked, the
-permission mode of the runs (nobody is there to approve anything; default `auto`), macOS
-notifications (`--notify`).
+effort level of the runs (`--effort`, default `high`), the permission mode of the runs
+(nobody is there to approve anything; default `auto`), macOS notifications (`--notify`).
+The effort level and permission mode are passed on every run, new or resumed, so that they
+do not depend on Claude Code's defaults.
 
 ## Following it
 
