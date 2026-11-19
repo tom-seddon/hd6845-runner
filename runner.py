@@ -10,7 +10,10 @@ Feedback:
   var/runner.log    one line per event; follow it with `tail -f` (the path is printed at start)
   var/status        one line, the current state, rewritten as things happen
   var/runs/NNN.log  what run NNN did, one line per tool call or message
-  var/runs/NNN-report.md  the run's final report
+  var/runs/NNN-report.md  the run's reports: the text of every result, in order
+
+Each run is refused if another Claude Code session is tracing in the repository, and a saved
+session that was resumed elsewhere is not resumed again. `--reset` forgets the saved session.
 
 Control (files in this folder, created by hand, e.g. `touch STOP`):
   STOP   stop gracefully: between runs, or while waiting for quota. A run in progress
@@ -58,6 +61,26 @@ MAX_RESUMES = 2                # resumes of one session after errors or stalls, 
 MAX_NO_PROGRESS = 2            # finished runs in a row with nothing put on main, before stopping
 MAX_BLOCKED = 3                # runs in a row that do not start although the quota check passes
 
+# Headless Claude Code waits only 10 minutes after a turn ends for background tasks, then stops
+# them: run 1 (2026-11-19) ended its turn to wait for its background reviewer, which was stopped
+# part-way, so nothing merged. The wait is set to the idle timeout instead (run_env): long enough
+# for any review seen so far (10-17 minutes), and finite, so that a stray background command (the
+# resumed run 1 left two polling loops running) cannot hold a finished run open for ever.
+BG_WAIT_VAR = 'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS'
+
+# Text of a tool result that auto mode refused. Nobody can approve it in a headless run.
+REFUSED = 'denied by the Claude Code auto mode classifier'
+REFUSED_REASON_RE = re.compile(r'Reason:\s*\[?([^\].]+)')
+
+# A tracing call, as tools/costs.py in the trace repository counts one: the tracing wrapper run
+# for a package, a ship of its files, or an edit of them.
+T_RUN_RE = re.compile(r'tools/t\.sh\s+[a-z][a-z0-9_]*\s+\S+\.py')
+SHIP_RUN_RE = re.compile(r'tools/ship\.sh\s+["\']')
+PKG_FILE_RE = re.compile(r'(?:^|/)(?:trace/[a-z][a-z0-9_]*\.txt|notes/blocks/[a-z][a-z0-9_]*\.md|'
+                         r'floorplan\.d/[a-z][a-z0-9_]*\.txt|ports\.d/[a-z][a-z0-9_]*\.txt)$')
+BUSY_WINDOW_MINUTES = 15       # a busy session with a tracing call this recent is tracing now
+CONTINUED_RE = re.compile(r'"type":\s*"continued-in"')
+
 
 def is_fable(model):
     """True for the project's model, also when the name carries a context suffix such as [1m]."""
@@ -69,17 +92,34 @@ UNATTENDED_PROMPT = (
     'This session is one run of an unattended loop (hd6845-runner). Nobody will see or answer '
     'questions until the run has ended, so do not ask the user anything. Where /trace6845 leaves '
     'a choice, make it by the skill\'s own rules and say what you chose. Do one round of one '
-    'package. When the step 9 report is written, end your turn: the loop starts the next round '
-    'in a new session. At step 8, use `--continue` when the package has work left (the next run '
-    'carries on with it within minutes), and release the claim when it is finished. If a step '
-    'fails in a way the skill does not cover, stop as the skill says (push the branch, make the '
-    'notes say where to resume, report) and end your turn.')
+    'package. Reviewer agents run in the background here, whatever you ask for, and each '
+    'reviewer\'s report is delivered to you as a message when it finishes. Do not poll a '
+    'reviewer\'s files or wait for it in a loop: if there is nothing else to do while it works, '
+    'end your turn, and the run stays open until the report arrives. Before your final report, '
+    'stop any background commands you started. When the step 9 report is written, end your turn: '
+    'the loop starts the next round in a new session. At step 8, use `--continue` when the package '
+    'has work left (the next run carries on with it within minutes), and release the claim when '
+    'it is finished. If a step fails in a way the skill does not cover, stop as the skill says '
+    '(push the branch, make the notes say where to resume, report) and end your turn.')
 
 RESUME_PROMPT = ('You were stopped part-way through /trace6845 (by the usage limit, an error, or '
                  'the runner being interrupted). Carry on from exactly where you stopped, following '
                  'the /trace6845 instructions and notes/workflow.md to the letter. Check the state '
-                 'of the claim, the branch and main before acting. If you had already finished, '
-                 'say so and stop.')
+                 'of the claim, the branch and main before acting. A reviewer that was stopped '
+                 'before it reported means its round did not happen: run that round again with a '
+                 'new reviewer, so that every piece has its own review recorded. If you had already '
+                 'finished, say so and stop.')
+
+
+def run_env(a):
+    """The environment of each run: the background wait set to the idle timeout."""
+    return dict(os.environ, **{BG_WAIT_VAR: str(a.idle_timeout * 60 * 1000)})
+
+
+def project_dir(path):
+    """Claude Code's folder for the session histories of a working folder."""
+    return os.path.join(os.path.expanduser('~/.claude/projects'),
+                        path.replace('/', '-').replace('.', '-'))
 
 
 # ---------------------------------------------------------------- output
@@ -208,6 +248,7 @@ class Run:
         self.limit_text = None
         self.mismatch = None
         self.tool_calls = 0
+        self.refusals = 0
         self.last = ''
         self.stalled = False
         self.interrupted = False
@@ -256,13 +297,33 @@ class Run:
                     self.note(agent + self.last)
                 elif b.get('type') == 'text' and b.get('text', '').strip():
                     self.note('%ssays: %s' % (agent, short(b['text'], 200)))
+        elif kind == 'user':
+            msg = ev.get('message') or {}
+            agent = '  [agent] ' if ev.get('parent_tool_use_id') else ''
+            for b in msg.get('content') if isinstance(msg.get('content'), list) else []:
+                if not isinstance(b, dict) or b.get('type') != 'tool_result':
+                    continue
+                c = b.get('content')
+                text = c if isinstance(c, str) else ' '.join(
+                    x.get('text', '') for x in c or [] if isinstance(x, dict))
+                if REFUSED in text:
+                    self.refusals += 1
+                    m = REFUSED_REASON_RE.search(text)
+                    self.note('%sREFUSED by auto mode (%s), after: %s'
+                              % (agent, m.group(1).strip() if m else 'no reason given', self.last))
         elif kind == 'result':
+            # A turn can follow the final report (a late notification from a background task
+            # starts one), so every result is kept, in order: the last is not always the report.
             self.result = ev
             if ev.get('session_id'):
                 self.session = ev['session_id']
             text = str(ev.get('result') or '')
             if ev.get('is_error') and LIMIT_RE.search(text):
                 self.limit_text = short(text, 200)
+            if text.strip():
+                with open(self.report, 'a') as f:
+                    f.write('<!-- result at %s: %s%s -->\n\n%s\n\n' % (
+                        stamp(), ev.get('subtype'), ', error' if ev.get('is_error') else '', text))
             self.note('result: %s%s, %s turns, $%.2f' % (
                 ev.get('subtype'), ' (error)' if ev.get('is_error') else '',
                 ev.get('num_turns'), ev.get('total_cost_usd') or 0))
@@ -276,7 +337,7 @@ class Run:
                                       short(self.prompt, 200)))
         with open(stderr_path, 'a') as err:
             proc = subprocess.Popen(self.command(), cwd=self.a.repo, stdout=subprocess.PIPE,
-                                    stderr=err, text=True, bufsize=1)
+                                    stderr=err, text=True, bufsize=1, env=run_env(self.a))
         lines = queue.Queue()
 
         def reader():
@@ -338,9 +399,6 @@ class Run:
 
     def outcome(self, stderr_path, code):
         r = self.result or {}
-        if r.get('result'):
-            with open(self.report, 'w') as f:
-                f.write(str(r['result']) + '\n')
         try:
             with open(stderr_path) as f:
                 tail = f.read()[-2000:]
@@ -419,7 +477,122 @@ def wait_for_quota(a, out, reason):
         time.sleep(5)
 
 
+# ---------------------------------------------------------------- other sessions
+
+def recent_entries(path, minutes, tail_bytes=4 << 20):
+    """The entries of a session history file written in the last `minutes`."""
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - tail_bytes))
+            data = f.read().decode('utf-8', 'replace')
+    except OSError:
+        return []
+    out = []
+    for line in data.splitlines():
+        try:
+            e = json.loads(line)
+            t = datetime.datetime.fromisoformat(e['timestamp'].replace('Z', '+00:00'))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if t >= cutoff:
+            out.append(e)
+    return out
+
+
+def traced_recently(path, minutes):
+    """True if the history file (or its reviewers' files) holds a tracing call in the last
+    `minutes`: the tracing wrapper, a ship, or an edit of a package's files."""
+    files = [path] + [os.path.join(path[:-6], 'subagents', f)
+                      for f in (os.listdir(os.path.join(path[:-6], 'subagents'))
+                                if os.path.isdir(os.path.join(path[:-6], 'subagents')) else [])
+                      if f.endswith('.jsonl')]
+    for p in files:
+        try:
+            if time.time() - os.path.getmtime(p) > minutes * 60:
+                continue
+        except OSError:
+            continue
+        for e in recent_entries(p, minutes):
+            content = (e.get('message') or {}).get('content')
+            for b in content if isinstance(content, list) else []:
+                if not isinstance(b, dict) or b.get('type') != 'tool_use':
+                    continue
+                inp = b.get('input') or {}
+                if b.get('name') == 'Bash':
+                    cmd = str(inp.get('command', ''))
+                    if T_RUN_RE.search(cmd) or SHIP_RUN_RE.search(cmd):
+                        return True
+                elif b.get('name') in ('Edit', 'Write') and PKG_FILE_RE.search(str(inp.get('file_path', ''))):
+                    return True
+    return False
+
+
+def tracing_sessions(a):
+    """Other Claude Code sessions tracing in the trace repository now, as descriptions, or None
+    if the sessions could not be listed. A busy session counts if it works in one of the
+    packages' working copies, or in the main checkout with a tracing call in the last
+    BUSY_WINDOW_MINUTES. Idle sessions, and busy ones that are not tracing (a conversation
+    about the trace, say), do not count."""
+    try:
+        r = subprocess.run([a.claude, 'agents', '--json'], capture_output=True, text=True, timeout=60)
+        sessions = json.loads(r.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    parent = os.path.dirname(a.repo)
+    worktree = os.path.basename(a.repo) + '-'
+    found = []
+    for s in sessions if isinstance(sessions, list) else []:
+        cwd = os.path.abspath(str(s.get('cwd') or ''))
+        if s.get('status') != 'busy':
+            continue
+        in_worktree = os.path.dirname(cwd) == parent and os.path.basename(cwd).startswith(worktree)
+        if cwd != a.repo and not in_worktree:
+            continue
+        sid = str(s.get('sessionId') or '')
+        hist = os.path.join(project_dir(cwd), sid + '.jsonl')
+        if in_worktree or traced_recently(hist, BUSY_WINDOW_MINUTES):
+            found.append('%s (%s, %s, pid %s, in %s)' % (s.get('name') or sid[:8], sid[:8],
+                                                        s.get('kind'), s.get('pid'), cwd))
+    return found
+
+
+def continued_in(a, session):
+    """The ID a session was continued under elsewhere (resumed outside the runner), or None."""
+    path = os.path.join(project_dir(a.repo), session + '.jsonl')
+    nxt = None
+    try:
+        with open(path, errors='replace') as f:
+            for line in f:
+                if CONTINUED_RE.search(line):
+                    try:
+                        nxt = json.loads(line).get('continuedInSessionId') or nxt
+                    except ValueError:
+                        pass
+    except OSError:
+        return None
+    return nxt
+
+
 # ---------------------------------------------------------------- the loop
+
+def take_lock():
+    """The runner's lock, held until exit, or None if another runner holds it."""
+    lock = open(LOCK, 'a+')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.seek(0)
+        print('runner: another runner is already going (pid %s; %s is locked)'
+              % (lock.read().strip() or '?', LOCK), file=sys.stderr)
+        return None
+    lock.seek(0)
+    lock.truncate()
+    lock.write(str(os.getpid()))
+    lock.flush()
+    return lock
+
 
 def check_setup(a):
     """Problems that stop the runner before it starts (empty list: none)."""
@@ -465,6 +638,9 @@ def parse_args():
                    help='the claude command (default: %(default)s)')
     p.add_argument('--check', action='store_true',
                    help='check the setup, show what would run, and exit without running anything')
+    p.add_argument('--reset', action='store_true',
+                   help='forget the saved session and the counters, so that the next start begins '
+                        'a new run; runs nothing, and refuses while a runner is going')
     a = p.parse_args()
     a.repo = os.path.abspath(os.path.expanduser(a.repo))
     return a
@@ -475,18 +651,43 @@ def main():
     os.makedirs(RUNS, exist_ok=True)
     out = Out(a.notify)
 
-    problems = check_setup(a)
     st = load_state()
+    if a.reset:
+        lock = take_lock()
+        if not lock:
+            return 2
+        old = 'session %s (%s), %d no-progress, %d resumes, %d blocked' % (
+            st.get('session'), st.get('status'), st.get('no_progress', 0), st.get('resumes', 0),
+            st.get('blocked', 0))
+        st.update(session=None, status=None, resumes=0, no_progress=0, blocked=0)
+        save_state(st)
+        out.log('RESET', 'forgot %s; the next start begins run %d in a new session'
+                % (old, st.get('run', 0) + 1))
+        out.status('RESET', 'the next start begins a new run')
+        return 0
+
+    problems = check_setup(a)
+    resume = bool(st.get('session')) and st.get('status') in ('running', 'interrupted')
+    if resume and continued_in(a, st['session']):
+        problems.append('the saved session %s was continued elsewhere as %s (resumed outside the '
+                        'runner): look at it, then ./runner.py --reset'
+                        % (st['session'], continued_in(a, st['session'])))
+    others = tracing_sessions(a) if a.claude else None
+    if others:
+        problems.append('another Claude Code session is tracing in the repository: %s; start '
+                        'when it has finished' % '; '.join(others))
     if a.check:
         print('log:     tail -f %s' % LOG)
         print('status:  cat %s' % STATUS)
         print('claude:  %s' % a.claude)
         print('repo:    %s' % a.repo)
-        print('model:   %s, effort %s, permission mode %s' % (MODEL, a.effort, a.permission_mode))
+        print('model:   %s, effort %s, permission mode %s; background wait %d min'
+              % (MODEL, a.effort, a.permission_mode, a.idle_timeout))
         print('state:   %s' % json.dumps(st))
-        resume = st.get('session') and st.get('status') in ('running', 'interrupted')
         print('next:    %s' % ('resume session %s' % st['session'] if resume
                                 else 'new session: /trace6845' + (' ' + a.package if a.package else '')))
+        print('others:  %s' % ('could not list the sessions' if others is None
+                                else 'none tracing' if not others else '; '.join(others)))
         print('problems: ' + ('; '.join(problems) if problems else 'none'))
         return 1 if problems else 0
     if problems:
@@ -494,18 +695,9 @@ def main():
             print('runner: ' + pr, file=sys.stderr)
         return 2
 
-    lock = open(LOCK, 'a+')
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock.seek(0)
-        print('runner: another runner is already going (pid %s; %s is locked)'
-              % (lock.read().strip() or '?', LOCK), file=sys.stderr)
+    lock = take_lock()
+    if not lock:
         return 2
-    lock.seek(0)
-    lock.truncate()
-    lock.write(str(os.getpid()))
-    lock.flush()
 
     def on_sigterm(signum, frame):
         raise KeyboardInterrupt()
@@ -519,6 +711,7 @@ def main():
             % (os.getpid(), a.repo, MODEL, a.effort, a.on_quota, a.permission_mode))
     who = git(a.repo, 'config', 'user.name') or ''
     package = a.package
+    warned_listing = False
 
     while True:
         if take_file(STOP):
@@ -527,6 +720,21 @@ def main():
             return 0
 
         resume = bool(st.get('session')) and st.get('status') in ('running', 'interrupted')
+        others = tracing_sessions(a)
+        if others is None and not warned_listing:
+            out.log('WARNING', 'could not list the Claude Code sessions; not checking for others')
+            warned_listing = True
+        if others:
+            out.log('STOPPED', 'another Claude Code session is tracing in the repository: %s; '
+                    'start again when it has finished' % '; '.join(others), notify=True)
+            out.status('STOPPED', 'another session is tracing in the repository')
+            return 7
+        if resume and continued_in(a, st['session']):
+            out.log('STOPPED', 'the saved session %s was continued elsewhere as %s (resumed '
+                    'outside the runner): look at it, then ./runner.py --reset'
+                    % (st['session'], continued_in(a, st['session'])), notify=True)
+            out.status('STOPPED', 'saved session continued elsewhere; --reset after looking')
+            return 6
         if resume:
             prompt, session = RESUME_PROMPT, st['session']
             out.log('RUN', 'run %d: resuming session %s' % (st['run'], session))
@@ -548,6 +756,8 @@ def main():
         mins = (run.ended - run.started).total_seconds() / 60
         summary = 'run %d: %d min, $%.2f (all runs $%.2f)' % (st['run'], mins, run.cost(),
                                                              st['total_cost_usd'])
+        if run.refusals:
+            summary += ', %d refused by auto mode (see %s)' % (run.refusals, run.runlog)
 
         if result == 'model_mismatch':
             st['status'] = 'abandoned'

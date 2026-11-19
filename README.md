@@ -13,6 +13,7 @@ the `claude` command on the PATH.
 ```
 ./runner.py --check      # check the setup and show what would run; runs nothing
 ./runner.py              # start; prints the `tail -f` command for its log
+./runner.py --reset      # forget the saved session and counters; runs nothing
 ```
 
 `./runner.py --help` lists the options: the first package (`--package`), what to do at the
@@ -22,14 +23,17 @@ effort level of the runs (`--effort`, default `high`), the permission mode of th
 The effort level and permission mode are passed on every run, new or resumed, so that they
 do not depend on Claude Code's defaults.
 
+`--reset` is for after a run has been finished or looked at by hand: the next start then
+begins a new run instead of resuming the saved session.
+
 ## Following it
 
 | File | What |
 |---|---|
-| `var/runner.log` | one line per event: `START`, `RUN`, `DONE`, `MERGED`, `NOMERGE`, `ENDED`, `BLOCKED`, `RESUME`, `STOPPED` (`tail -f`) |
+| `var/runner.log` | one line per event: `START`, `RUN`, `DONE`, `MERGED`, `NOMERGE`, `ENDED`, `BLOCKED`, `RESUME`, `STOPPED`, `RESET`, `WARNING` (`tail -f`) |
 | `var/status` | one line: what it is doing now |
-| `var/runs/NNN.log` | what run NNN did, one line per tool call or message |
-| `var/runs/NNN-report.md` | the run's final report |
+| `var/runs/NNN.log` | what run NNN did, one line per tool call or message, and each auto-mode refusal |
+| `var/runs/NNN-report.md` | the run's reports: the text of every result, in order |
 
 The sessions themselves are ordinary Claude Code sessions: `claude --resume` in the trace
 repository lists them.
@@ -44,10 +48,13 @@ repository lists them.
 
 Every run, new or resumed, gets a short addition to its system prompt
 (`UNATTENDED_PROMPT` in `runner.py`): it is one run of an unattended loop, so it asks
-nothing and makes the skill's open choices by the skill's own rules; it does one round of
-one package and ends its turn after the step 9 report; at the hand-off it keeps the claim
-(`--continue`) while the package has work left and releases it when the package is finished.
-It overrides none of the skill's rules.
+nothing and makes the skill's open choices by the skill's own rules; reviewer agents run in
+the background and their reports are delivered to it, so it does not poll them and may end
+its turn while one works; it stops any background commands it started before its final
+report; it does one round of one package and ends its turn after the step 9 report; at the
+hand-off it keeps the claim (`--continue`) while the package has work left and releases it
+when the package is finished. A resumed run is also told that a reviewer stopped before it
+reported means that round did not happen. None of this overrides the skill's rules.
 
 ## What it guards against
 
@@ -60,7 +67,22 @@ It overrides none of the skill's rules.
   and are not saved.
 - **A stuck package.** A run counts as progress when a `Handoff` commit of yours reaches main.
   Two finished runs in a row without one stop the runner.
+- **Reviewers cut off.** Headless Claude Code stops background tasks 10 minutes after a turn
+  ends, and reviewer agents always run in the background. Each run gets
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` set to the idle timeout (90 minutes by default):
+  long enough for a review, and finite, so that a stray background command cannot hold a
+  finished run open.
 - **A run that hangs.** No output for 90 minutes (`--idle-timeout`): stopped and resumed, at
   most twice per session.
+- **Another session tracing.** Before each run, `claude agents --json` lists the Claude Code
+  sessions on this Mac. The runner stops if one of them is busy in a package's working copy,
+  or busy in the main checkout with a tracing call (the tracing wrapper, a ship, an edit of a
+  package's files) in the last 15 minutes. Idle sessions, and conversations about the trace
+  that do not trace, do not count.
+- **A session resumed elsewhere.** A saved session that was continued outside the runner
+  (its history ends with a `continued-in` entry) is not resumed again: the runner stops and
+  says so; `--reset` after looking at it.
+- **Refusals nobody can approve.** Each auto-mode refusal is a line in the run's log, and the
+  run's summary line counts them.
 - **Two runners at once.** A lock file; the trace workflow is one package at a time.
 - **Sleep.** The Mac is kept awake (`caffeinate`) while the runner is going.
